@@ -95,11 +95,11 @@ Next you start Weave on each host in turn.
 
 On host `weave-gs-01`
 
-    sudo weave launch
+    weave launch 172.17.8.102
 
 On host `weave-gs-02`
 
-    sudo weave launch 172.17.8.101
+    weave launch 172.17.8.101
 
 Your two hosts are now connected to each other, and any subsequent containers you launch with Weave will be visible to other containers Weave is aware of.
 
@@ -114,7 +114,7 @@ On your first host, `weave-gs-01`, you have launched a Weave router container. O
 
 At this point you have a single container running on each host, which you can see from docker. On either host run
 
-    sudo docker ps
+    docker ps
 
 and you will see something similar to:
 
