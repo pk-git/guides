@@ -1,19 +1,13 @@
 #cloud-config
 
 write_files:
-  - path: /etc/weave.kube-01.env
+  - path: /etc/kubelet.kube-01.env
     permissions: '0600'
     owner: root
     content: |
       KUBELET_HOST_ARGS="--register-node=false"
 
-  - path: /etc/weave.kube-02.env
-    permissions: '0600'
-    owner: root
-    content: |
-      KUBELET_HOST_ARGS="--docker-endpoint=unix:/var/run/weave/weave.sock"
-
-  - path: /etc/weave.kube-03.env
+  - path: /etc/kubelet.env
     permissions: '0600'
     owner: root
     content: |
@@ -23,11 +17,41 @@ write_files:
     permissions: '0600'
     owner: root
     content: |
-      #WEAVE_PEERS="172.17.8.101 172.17.8.102 172.17.8.103"
+      WEAVE_PEERS="172.17.8.101 172.17.8.102 172.17.8.103"
       # Uncomment and make it more secure
       # WEAVE_PASSWORD="aVeryLongString"
 
-  - path: "/etc/kubernetes/manifests.kube-01/kube-proxy.yaml"
+  - path: "/etc/kubernetes/manifests/weave-scope.yaml"
+    permissions: '0600'
+    owner: root
+    content: |
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: weave-scope
+        namespace: kube-system
+      spec:
+        hostNetwork: true
+        hostPID: true
+        containers:
+        - name: scope
+          image: weaveworks/scope:0.9.0
+          args:
+          - --probe.docker
+          - "true"
+          - --probe.kubernetes
+          - "true"
+          - 172.17.8.101
+          - 172.17.8.102
+          - 172.17.8.103
+          ports:
+          - containerPort: 4040
+            hostPort: 4040
+            name: local
+          securityContext:
+            privileged: true
+
+  - path: "/etc/kubernetes/manifests/kube-proxy.yaml"
     permissions: '0600'
     owner: root
     content: |
@@ -44,21 +68,13 @@ write_files:
           command:
           - /hyperkube
           - proxy
-          - --master=http://localhost:8080
+          - --master=http://172.17.8.101:8080
           - --logtostderr=true
           - --v=2
           securityContext:
             privileged: true
-          #volumeMounts:
-          #- mountPath: /etc/ssl/certs
-          #  name: ssl-certs-host
-          #  readOnly: true
-        #volumes:
-        #- hostPath:
-        #    path: /usr/share/ca-certificates
-        #  name: ssl-certs-host
 
-  - path: "/etc/kubernetes/manifests.kube-01/kube-master.yaml"
+  - path: "/etc/kubernetes/master-manifests/kube-master.yaml"
     permissions: '0600'
     owner: root
     content: |
@@ -83,31 +99,11 @@ write_files:
           - --cloud-provider=vagrant
           - --logtostderr=true
           - --v=3
-          #- --bind-address=0.0.0.0
-          #- --etcd_servers=${ETCD_ENDPOINTS}
           - --allow-privileged=true
-          #- --service-cluster-ip-range=${SERVICE_IP_RANGE}
-          #- --secure_port=443
-          #- --advertise-address=${ADVERTISE_IP}
-          #- --admission-control=NamespaceLifecycle,NamespaceExists,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota
-          #- --tls-cert-file=/etc/kubernetes/ssl/apiserver.pem
-          #- --tls-private-key-file=/etc/kubernetes/ssl/apiserver-key.pem
-          #- --client-ca-file=/etc/kubernetes/ssl/ca.pem
-          #- --service-account-key-file=/etc/kubernetes/ssl/apiserver-key.pem
           ports:
-          #- containerPort: 443
-          #  hostPort: 443
-          #  name: https
           - containerPort: 8080
             hostPort: 8080
             name: local
-          #volumeMounts:
-          #- mountPath: /etc/kubernetes/ssl
-          #  name: ssl-certs-kubernetes
-          #  readOnly: true
-          #- mountPath: /etc/ssl/certs
-          #  name: ssl-certs-host
-          #  readOnly: true
         - name: kube-controller-manager
           image: gcr.io/google_containers/hyperkube:v1.0.6
           command:
@@ -124,13 +120,6 @@ write_files:
           - --master=http://localhost:8080
           - --logtostderr=true
           - --v=2
-        #volumes:
-        #- hostPath:
-        #    path: /etc/kubernetes/ssl
-        #  name: ssl-certs-kubernetes
-        #- hostPath:
-        #    path: /usr/share/ca-certificates
-        #  name: ssl-certs-host
 
 coreos:
   update:
@@ -173,23 +162,20 @@ coreos:
         WantedBy=kubernetes-master.target
         WantedBy=kubernetes-node.target
 
-    #- name: kubernetes-master.target
-    #  enable: true
-    #  command: start
-    #  content: |
-    #    [Unit]
-    #    Description=Kubernetes Cluster Master
-    #    Documentation=http://kubernetes.io/
-    #    RefuseManualStart=no
-    #    After=weave-network.target
-    #    Requires=weave-network.target
-    #    ConditionHost=kube-01
-    #    Wants=kube-apiserver.service
-    #    Wants=kube-scheduler.service
-    #    Wants=kube-controller-manager.service
-    #    Wants=kube-proxy.service
-    #    [Install]
-    #    WantedBy=multi-user.target
+    - name: kubernetes-master.target
+      enable: true
+      command: start
+      content: |
+        [Unit]
+        Description=Kubernetes Cluster Master
+        Documentation=http://kubernetes.io/
+        RefuseManualStart=no
+        After=weave-network.target
+        Requires=weave-network.target
+        ConditionHost=kube-01
+        Wants=kubelet.service
+        [Install]
+        WantedBy=multi-user.target
 
     - name: kubernetes-node.target
       enable: true
@@ -201,8 +187,7 @@ coreos:
         RefuseManualStart=no
         After=weave-network.target
         Requires=weave-network.target
-        #ConditionHost=!kube-01
-        #Wants=kube-proxy.service
+        ConditionHost=!kube-01
         Wants=kubelet.service
         [Install]
         WantedBy=multi-user.target
@@ -304,7 +289,6 @@ coreos:
         EnvironmentFile=-/etc/weave.%H.env
         EnvironmentFile=-/etc/weave.env
         ExecStart=/opt/bin/weave expose
-        ExecStartPost=/opt/bin/weave expose $KUBE_MANAGEMENT_HOST_CIDR
         ExecStop=/opt/bin/weave hide
         [Install]
         WantedBy=weave-network.target
@@ -319,38 +303,19 @@ coreos:
         Documentation=http://kubernetes.io/
         Wants=weave-network.target
         [Service]
-        EnvironmentFile=-/etc/weave.%H.env
-        EnvironmentFile=-/etc/weave.env
-        ExecStartPre=/bin/mkdir -p /etc/kubernetes/manifests.%H/
+        EnvironmentFile=-/etc/kubelet.env
+        EnvironmentFile=-/etc/kubelet.%H.env
+        ExecStartPre=-/bin/bash -c \
+          'test %H = kube-01 && cp /etc/kubernetes/master-manifests/kube-master.yaml /etc/kubernetes/manifests/'
         ExecStart=/usr/bin/kubelet \
             $KUBELET_HOST_ARGS \
+            --api-servers=http://172.17.8.101:8080 \
+            --config=/etc/kubernetes/manifests/ \
             --port=10250 \
-            --api-servers=http://$public_ipv4:8080 \
             --logtostderr=true \
             --allow-privileged=true \
-            --config=/etc/kubernetes/manifests.%H \
             --v=2
         Restart=always
         RestartSec=10
         [Install]
         WantedBy=kubernetes-node.target
-
-    #- name: kube-create-addons.service
-    #  enable: true
-    #  content: |
-    #    [Unit]
-    #    After=install-kubernetes.service
-    #    ConditionFileIsExecutable=/opt/kubernetes/server/bin/kubectl
-    #    ConditionPathIsDirectory=/etc/kubernetes/addons/
-    #    ConditionHost=kube-01
-    #    Description=Kubernetes Addons
-    #    Documentation=http://kubernetes.io/
-    #    Wants=install-kubernetes.service
-    #    Wants=kube-apiserver.service
-    #    [Service]
-    #    Type=oneshot
-    #    RemainAfterExit=no
-    #    ExecStart=/bin/bash -c 'until /opt/kubernetes/server/bin/kubectl create -f /etc/kubernetes/addons/; do sleep 2; done'
-    #    SuccessExitStatus=1
-    #    [Install]
-    #    WantedBy=kubernetes-master.target
