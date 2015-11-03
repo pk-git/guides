@@ -5,9 +5,16 @@ write_files:
     permissions: '0600'
     owner: root
     content: |
-      WEAVE_PEERS="172.17.8.101 172.17.8.102 172.17.8.103"
+      #WEAVE_PEERS="172.17.8.101 172.17.8.102 172.17.8.103"
       # Uncomment and make it more secure
       # WEAVE_PASSWORD="aVeryLongString"
+
+  - path: /etc/weave-hyperkube.env
+    permissions: '0600'
+    owner: root
+    content: |
+      DOCKER_HOST="unix:///var/run/weave/weave.sock"
+      HYPERKUBE_IMG="gcr.io/google_containers/hyperkube:v1.0.6"
 
 coreos:
   update:
@@ -22,7 +29,8 @@ coreos:
     listen-client-urls: 'http://0.0.0.0:2379,http://0.0.0.0:4001'
     advertise-client-urls: 'http://$public_ipv4:2379,http://$public_ipv4:4001'
     initial-cluster-state: 'new'
-    initial-cluster: '172.17.8.101=http://172.17.8.101:2380,172.17.8.102=http://172.17.8.102:2380,172.17.8.103=http://172.17.8.103:2380'
+    initial-cluster: '172.17.8.101=http://172.17.8.101:2380'
+    #initial-cluster: '172.17.8.101=http://172.17.8.101:2380,172.17.8.102=http://172.17.8.102:2380,172.17.8.103=http://172.17.8.103:2380'
 
   units:
     - name: systemd-networkd-wait-online.service
@@ -132,7 +140,7 @@ coreos:
         [Service]
         EnvironmentFile=-/etc/weave.%H.env
         EnvironmentFile=-/etc/weave.env
-        ExecStartPre=/opt/bin/weave launch-proxy --rewrite-inspect --without-dns
+        ExecStartPre=/opt/bin/weave launch-proxy --rewrite-inspect
         ExecStart=/usr/bin/docker attach weaveproxy
         Restart=on-failure
         ExecStop=/opt/bin/weave stop-proxy
@@ -177,63 +185,29 @@ coreos:
         TimeoutStartSec=0
         EnvironmentFile=-/etc/weave.%H.env
         EnvironmentFile=-/etc/weave.env
-        ExecStart=/opt/bin/weave expose
+        ExecStart=/opt/bin/weave expose -h %H.weave.local
         ExecStop=/opt/bin/weave hide
         [Install]
         WantedBy=weave-network.target
-
-    - name: install-kubernetes.service
-      enable: true
-      content: |
-        [Unit]
-        After=network-online.target
-        Before=kube-apiserver.service
-        Before=kube-controller-manager.service
-        Before=kubelet.service
-        Before=kube-proxy.service
-        Description=Download Kubernetes Binaries
-        Documentation=http://kubernetes.io/
-        Requires=network-online.target
-        [Service]
-        Environment=KUBE_RELEASE_TARBALL=https://github.com/GoogleCloudPlatform/kubernetes/releases/download/v1.0.6/kubernetes.tar.gz
-        ExecStartPre=/bin/mkdir -p /opt/
-        ExecStart=/bin/bash -c "curl --silent --location $KUBE_RELEASE_TARBALL | tar xzv -C /tmp/"
-        ExecStart=/bin/tar xzvf /tmp/kubernetes/server/kubernetes-server-linux-amd64.tar.gz -C /opt
-        ExecStartPost=/bin/chmod o+rx -R /opt/kubernetes
-        ExecStartPost=/bin/ln -s /opt/kubernetes/server/bin/kubectl /opt/bin/
-        ExecStartPost=/bin/mv /tmp/kubernetes/examples/guestbook /home/core/guestbook-example
-        ExecStartPost=/bin/chown core. -R /home/core/guestbook-example
-        ExecStartPost=/bin/rm -rf /tmp/kubernetes
-        ExecStartPost=/bin/sed 's/# type: LoadBalancer/type: NodePort/' -i /home/core/guestbook-example/frontend-service.yaml
-        RemainAfterExit=yes
-        Type=oneshot
-        [Install]
-        WantedBy=kubernetes-master.target
-        WantedBy=kubernetes-node.target
 
     - name: kube-apiserver.service
       enable: true
       content: |
         [Unit]
         After=etcd2.service
-        After=install-kubernetes.service
         Before=kube-controller-manager.service
         Before=kube-scheduler.service
-        ConditionFileIsExecutable=/opt/kubernetes/server/bin/kube-apiserver
         Description=Kubernetes API Server
         Documentation=http://kubernetes.io/
         Wants=etcd2.service
-        Wants=install-kubernetes.service
         ConditionHost=kube-01
         [Service]
-        ExecStart=/opt/kubernetes/server/bin/kube-apiserver \
-            --insecure-bind-address=0.0.0.0 \
-            --advertise-address=$public_ipv4 \
-            --port=8080 \
-            --etcd-servers=http://127.0.0.1:4001 \
-            --service-cluster-ip-range=10.16.0.0/12 \
-            --cloud-provider=vagrant \
-            --logtostderr=true
+        EnvironmentFile=/etc/weave-hyperkube.env
+        ExecStartPre=-/usr/bin/docker rm -f kube-apiserver
+        ExecStart=/usr/bin/docker run \
+            --name kube-apiserver \
+            $HYPERKUBE_IMG bash -x -c \
+              "weave_ip=`hostname -i`; /hyperkube apiserver --insecure-bind-address=$weave_ip --advertise-address=$weave_ip --external-hostname=kube-apiserver.weave.local --port=8080 --etcd-servers=http://172.17.8.101:4001 --service-cluster-ip-range=10.16.0.0/12 --cloud-provider=vagrant --logtostderr=true"
         Restart=always
         RestartSec=10
         [Install]
@@ -244,16 +218,18 @@ coreos:
       content: |
         [Unit]
         After=kube-apiserver.service
-        After=install-kubernetes.service
-        ConditionFileIsExecutable=/opt/kubernetes/server/bin/kube-scheduler
         Description=Kubernetes Scheduler
         Documentation=http://kubernetes.io/
         Wants=kube-apiserver.service
         ConditionHost=kube-01
         [Service]
-        ExecStart=/opt/kubernetes/server/bin/kube-scheduler \
-            --logtostderr=true \
-            --master=127.0.0.1:8080
+        EnvironmentFile=/etc/weave-hyperkube.env
+        ExecStartPre=-/usr/bin/docker rm -f kube-scheduler
+        ExecStart=/usr/bin/docker run \
+            --name kube-scheduler \
+            $HYPERKUBE_IMG /hyperkube scheduler \
+            --master=http://kube-apiserver.weave.local:8080 \
+            --logtostderr=true
         Restart=always
         RestartSec=10
         [Install]
@@ -264,19 +240,20 @@ coreos:
       content: |
         [Unit]
         After=etcd2.service
-        After=install-kubernetes.service
         After=kube-apiserver.service
-        ConditionFileIsExecutable=/opt/kubernetes/server/bin/kube-controller-manager
         Description=Kubernetes Controller Manager
         Documentation=http://kubernetes.io/
         Wants=kube-apiserver.service
         Wants=etcd2.service
-        Wants=install-kubernetes.service
         ConditionHost=kube-01
         [Service]
-        ExecStart=/opt/kubernetes/server/bin/kube-controller-manager \
+        EnvironmentFile=/etc/weave-hyperkube.env
+        ExecStartPre=-/usr/bin/docker rm -f kube-controller-manager
+        ExecStart=/usr/bin/docker run \
+            --name kube-controller-manager \
+            $HYPERKUBE_IMG /hyperkube controller-manager \
             --cloud_provider=vagrant \
-            --master=127.0.0.1:8080 \
+            --master=http://kube-apiserver.weave.local:8080 \
             --logtostderr=true
         Restart=always
         RestartSec=10
@@ -288,12 +265,9 @@ coreos:
       content: |
         [Unit]
         After=etcd2.service
-        After=install-kubernetes.service
-        ConditionFileIsExecutable=/opt/kubernetes/server/bin/kubelet
         Description=Kubernetes Kubelet
         Documentation=http://kubernetes.io/
         Wants=etcd2.service
-        Wants=install-kubernetes.service
         ConditionHost=!kube-01
         [Service]
         ExecStartPre=/bin/mkdir -p /etc/kubernetes/manifests/
@@ -317,38 +291,32 @@ coreos:
       content: |
         [Unit]
         After=etcd2.service
-        After=install-kubernetes.service
-        ConditionFileIsExecutable=/opt/kubernetes/server/bin/kube-proxy
         Description=Kubernetes Proxy
         Documentation=http://kubernetes.io/
         Wants=etcd2.service
-        Wants=install-kubernetes.service
         [Service]
         ExecStart=/opt/kubernetes/server/bin/kube-proxy \
-             --master=http://172.17.8.101:8080 \
-             --logtostderr=true
+            --master=http://kube-apiserver.weave.local:8080 \
+            --logtostderr=true
         Restart=always
         RestartSec=10
         [Install]
         WantedBy=kubernetes-master.target
         WantedBy=kubernetes-node.target
 
-    - name: kube-create-addons.service
-      enable: true
-      content: |
-        [Unit]
-        After=install-kubernetes.service
-        ConditionFileIsExecutable=/opt/kubernetes/server/bin/kubectl
-        ConditionPathIsDirectory=/etc/kubernetes/addons/
-        ConditionHost=kube-01
-        Description=Kubernetes Addons
-        Documentation=http://kubernetes.io/
-        Wants=install-kubernetes.service
-        Wants=kube-apiserver.service
-        [Service]
-        Type=oneshot
-        RemainAfterExit=no
-        ExecStart=/bin/bash -c 'until /opt/kubernetes/server/bin/kubectl create -f /etc/kubernetes/addons/; do sleep 2; done'
-        SuccessExitStatus=1
-        [Install]
-        WantedBy=kubernetes-master.target
+    #- name: kube-create-addons.service
+    #  enable: true
+    #  content: |
+    #    [Unit]
+    #    ConditionPathIsDirectory=/etc/kubernetes/addons/
+    #    ConditionHost=kube-01
+    #    Description=Kubernetes Addons
+    #    Documentation=http://kubernetes.io/
+    #    Wants=kube-apiserver.service
+    #    [Service]
+    #    Type=oneshot
+    #    RemainAfterExit=no
+    #    ExecStart=/bin/bash -c 'until /opt/kubernetes/server/bin/kubectl create -f /etc/kubernetes/addons/; do sleep 2; done'
+    #    SuccessExitStatus=1
+    #    [Install]
+    #    WantedBy=kubernetes-master.target
