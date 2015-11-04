@@ -24,7 +24,7 @@ if File.exists?('kubernetes-cluster.yaml') && ARGV[0].eql?('up')
 end
 
 $instance_name_prefix = 'kube'
-$num_instances = 3
-$vb_memory = 2048
+#$num_instances = 3
+$vb_memory = 2048*2
 $vb_cpus = 2
 $update_channel = 'stable'

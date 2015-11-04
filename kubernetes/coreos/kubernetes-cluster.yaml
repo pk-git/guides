@@ -1,6 +1,13 @@
 #cloud-config
 
 write_files:
+  - path: /opt/bin/weave-force-nameserver.sh
+    permissions: '0755'
+    owner: root
+    content: |
+      #!/bin/bash -x
+      ip -4 addr show dev docker0 | grep -m1 -o 'inet [.0-9]*' | sed 's/inet \([.0-9]*\)/nameserver \1/' > /etc/resolv.conf
+
   - path: /etc/weave.env
     permissions: '0600'
     owner: root
@@ -51,6 +58,7 @@ coreos:
         Description=Weave Network Setup Complete
         Documentation=man:systemd.special(7)
         RefuseManualStart=no
+        Wants=weave-network.target
         After=network-online.target
         [Install]
         WantedBy=multi-user.target
@@ -65,13 +73,13 @@ coreos:
         Description=Kubernetes Cluster Master
         Documentation=http://kubernetes.io/
         RefuseManualStart=no
-        After=weave-network.target
-        Requires=weave-network.target
+        Wants=weave-network.target
+        After=network-online.target
         ConditionHost=kube-01
         Wants=kube-apiserver.service
         Wants=kube-scheduler.service
         Wants=kube-controller-manager.service
-        Wants=kube-proxy.service
+        #Wants=kube-proxy.service
         [Install]
         WantedBy=multi-user.target
 
@@ -83,11 +91,11 @@ coreos:
         Description=Kubernetes Cluster Node
         Documentation=http://kubernetes.io/
         RefuseManualStart=no
-        After=weave-network.target
-        Requires=weave-network.target
+        Wants=weave-network.target
+        After=network-online.target
         ConditionHost=!kube-01
-        Wants=kube-proxy.service
-        Wants=kubelet.service
+        #Wants=kube-proxy.service
+        #Wants=kubelet.service
         [Install]
         WantedBy=multi-user.target
 
@@ -190,24 +198,47 @@ coreos:
         [Install]
         WantedBy=weave-network.target
 
+    - name: install-hyperkube.service
+      enable: true
+      content: |
+        [Unit]
+        Description=Install Hyberkube
+        After=docker.service
+        Requires=docker.service
+        After=network-online.target
+        Requires=network-online.target
+        [Service]
+        EnvironmentFile=/etc/weave-hyperkube.env
+        Type=oneshot
+        RemainAfterExit=yes
+        TimeoutStartSec=0
+        ExecStart=/usr/bin/docker -H unix:///var/run/docker.sock pull $HYPERKUBE_IMG
+        [Install]
+        WantedBy=kubernetes-master.target
+        WantedBy=weave.service
+
     - name: kube-apiserver.service
       enable: true
       content: |
         [Unit]
-        After=etcd2.service
-        Before=kube-controller-manager.service
-        Before=kube-scheduler.service
         Description=Kubernetes API Server
         Documentation=http://kubernetes.io/
-        Wants=etcd2.service
+        After=install-hyperkube.service
+        Requires=install-hyperkube.service
+        After=weave-network.target
+        Requires=weave-network.target
+        After=etcd2.service
+        Requires=etcd2.service
+        Before=kube-controller-manager.service
+        Before=kube-scheduler.service
         ConditionHost=kube-01
         [Service]
         EnvironmentFile=/etc/weave-hyperkube.env
         ExecStartPre=-/usr/bin/docker rm -f kube-apiserver
-        ExecStart=/usr/bin/docker run \
-            --name kube-apiserver \
+        ExecStart=/usr/bin/docker run --rm \
+            --name=kube-apiserver \
             $HYPERKUBE_IMG bash -x -c \
-              "weave_ip=`hostname -i`; /hyperkube apiserver --insecure-bind-address=$weave_ip --advertise-address=$weave_ip --external-hostname=kube-apiserver.weave.local --port=8080 --etcd-servers=http://172.17.8.101:4001 --service-cluster-ip-range=10.16.0.0/12 --cloud-provider=vagrant --logtostderr=true"
+              "weave_ip=`hostname -i` ; /hyperkube apiserver --insecure-bind-address=$weave_ip --advertise-address=$weave_ip --external-hostname=kube-apiserver.weave.local --port=8080 --etcd-servers=http://172.17.8.101:4001 --service-cluster-ip-range=10.16.0.0/12 --cloud-provider=vagrant --logtostderr=true"
         Restart=always
         RestartSec=10
         [Install]
@@ -217,19 +248,21 @@ coreos:
       enable: true
       content: |
         [Unit]
-        After=kube-apiserver.service
         Description=Kubernetes Scheduler
         Documentation=http://kubernetes.io/
-        Wants=kube-apiserver.service
+        After=install-hyperkube.service
+        Requires=install-hyperkube.service
+        After=weave-network.target
+        Requires=weave-network.target
         ConditionHost=kube-01
         [Service]
         EnvironmentFile=/etc/weave-hyperkube.env
         ExecStartPre=-/usr/bin/docker rm -f kube-scheduler
-        ExecStart=/usr/bin/docker run \
-            --name kube-scheduler \
+        ExecStart=/usr/bin/docker run --rm \
+            --name=kube-scheduler \
             $HYPERKUBE_IMG /hyperkube scheduler \
-            --master=http://kube-apiserver.weave.local:8080 \
-            --logtostderr=true
+              --master=http://kube-apiserver.weave.local:8080 \
+              --logtostderr=true
         Restart=always
         RestartSec=10
         [Install]
@@ -239,65 +272,75 @@ coreos:
       enable: true
       content: |
         [Unit]
-        After=etcd2.service
         After=kube-apiserver.service
         Description=Kubernetes Controller Manager
         Documentation=http://kubernetes.io/
-        Wants=kube-apiserver.service
-        Wants=etcd2.service
+        After=install-hyperkube.service
+        Requires=install-hyperkube.service
+        After=weave-network.target
+        Requires=weave-network.target
         ConditionHost=kube-01
         [Service]
         EnvironmentFile=/etc/weave-hyperkube.env
         ExecStartPre=-/usr/bin/docker rm -f kube-controller-manager
-        ExecStart=/usr/bin/docker run \
-            --name kube-controller-manager \
+        ExecStart=/usr/bin/docker run --rm \
+            --name=kube-controller-manager \
             $HYPERKUBE_IMG /hyperkube controller-manager \
-            --cloud_provider=vagrant \
-            --master=http://kube-apiserver.weave.local:8080 \
-            --logtostderr=true
+              --cloud_provider=vagrant \
+              --master=http://kube-apiserver.weave.local:8080 \
+              --logtostderr=true
         Restart=always
         RestartSec=10
         [Install]
         WantedBy=kubernetes-master.target
 
     - name: kubelet.service
-      enable: true
+      enable: false # true
       content: |
         [Unit]
-        After=etcd2.service
         Description=Kubernetes Kubelet
         Documentation=http://kubernetes.io/
-        Wants=etcd2.service
-        ConditionHost=!kube-01
+        After=install-hyperkube.service
+        Requires=install-hyperkube.service
+        After=weave-network.target
+        Requires=weave-network.target
+        #ConditionHost=!kube-01
         [Service]
-        ExecStartPre=/bin/mkdir -p /etc/kubernetes/manifests/
-        ExecStart=/opt/kubernetes/server/bin/kubelet \
-            --docker-endpoint=unix:/var/run/weave/weave.sock \
-            --address=$public_ipv4 \
-            --port=10250 \
-            --hostname-override=$public_ipv4 \
-            --api-servers=http://172.17.8.101:8080 \
-            --logtostderr=true \
-            --cluster-dns=10.16.0.3 \
-            --cluster-domain=kube.local \
-            --config=/etc/kubernetes/manifests/
+        EnvironmentFile=/etc/weave-hyperkube.env
+        ExecStartPre=-/usr/bin/docker rm -f kubelet
+        ExecStart=/usr/bin/docker run --rm \
+            --net=host \
+            --privileged=true \
+            --name=kubelet \
+            -v /opt/bin/weave-force-nameserver.sh:/bin/fix-nameserver \
+            -v /var/run/weave/weave.sock:/weave.sock \
+            $HYPERKUBE_IMG bash -x -c \
+              "fix-nameserver ; /hyperkube kubelet --docker-endpoint=unix:/weave.sock --port=10250 --api-servers=http://kube-apiserver.weave.local:8080 --cluster-dns=10.16.0.3 --cluster-domain=kube.local --logtostderr=true"
         Restart=always
         RestartSec=10
         [Install]
         WantedBy=kubernetes-node.target
 
     - name: kube-proxy.service
-      enable: true
+      enable: false # true
       content: |
         [Unit]
-        After=etcd2.service
         Description=Kubernetes Proxy
         Documentation=http://kubernetes.io/
-        Wants=etcd2.service
+        After=install-hyperkube.service
+        Requires=install-hyperkube.service
+        After=weave-network.target
+        Requires=weave-network.target
         [Service]
-        ExecStart=/opt/kubernetes/server/bin/kube-proxy \
-            --master=http://kube-apiserver.weave.local:8080 \
-            --logtostderr=true
+        EnvironmentFile=/etc/weave-hyperkube.env
+        ExecStartPre=-/usr/bin/docker rm -f kube-proxy
+        ExecStart=/usr/bin/docker run --rm \
+            --net=host \
+            --privileged=true \
+            --name=kube-proxy \
+            -v /opt/bin/weave-force-nameserver.sh:/bin/fix-nameserver \
+            $HYPERKUBE_IMG bash -x -c \
+              "fix-nameserver ; /hyperkube proxy --master=http://kube-apiserver.weave.local:8080 --logtostderr=true"
         Restart=always
         RestartSec=10
         [Install]
@@ -312,7 +355,6 @@ coreos:
     #    ConditionHost=kube-01
     #    Description=Kubernetes Addons
     #    Documentation=http://kubernetes.io/
-    #    Wants=kube-apiserver.service
     #    [Service]
     #    Type=oneshot
     #    RemainAfterExit=no
